@@ -1,0 +1,127 @@
+// ==UserScript==
+// @name         Bangumi Pixiv每日背景 (v1.2 背景亮度可调版)
+// @name:zh-CN   Bangumi Pixiv每日背景 (v1.2 背景亮度可调版)
+// @namespace    http://tampermonkey.net/
+// @version      1.2
+// @description  【最终稳定版】直接请求Pixiv获取日榜第一图片作为BGM背景，可自定义背景亮度和内容区域透明度。
+// @author       Gemini & Sai
+// @match        *://bgm.tv/*
+// @match        *://chii.in/*
+// @connect      www.pixiv.net
+// @connect      i.pximg.net
+// @grant        GM_xmlhttpRequest
+// @grant        GM_addStyle
+// ==/UserScript==
+
+(function() {
+    'use strict';
+
+    // --- 用户自定义配置区域 ---
+    // 你可以在这里轻松修改各种透明度/亮度效果
+
+    // 1. 背景图片的“亮度”（白色遮罩的不透明度）
+    //    数值越大，白色遮罩越浓，背景图就越'淡'，前景文字越清晰。
+    //    推荐值：0.6 ~ 0.85。设为 0.0 则完全不遮挡，恢复原始图片亮度。
+    const BACKGROUND_TINT_OPACITY = 0.5;
+
+    // 2. 主要内容区域的不透明度
+    //    数值越小，内容模块越透明。
+    const MAIN_OPACITY = 0.3;
+
+    // 3. 列表项等次要区域的不透明度
+    const ITEM_OPACITY = 0.85;
+    // --- 自定义区域结束 ---
+
+    /**
+     * 步骤一：获取 Pixiv 排行榜页面的 HTML
+     */
+    console.log('[BGM背景脚本] 步骤1: 正在获取Pixiv排行榜页面...');
+    GM_xmlhttpRequest({
+        method: 'GET',
+        url: 'https://www.pixiv.net/ranking.php?mode=daily&content=illust',
+        headers: {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36',
+            'Accept-Language': 'zh-CN,zh;q=0.9'
+        },
+        onload: function(response) {
+            if (response.status !== 200) {
+                console.error(`[BGM背景脚本] 步骤1失败: 获取排行榜页面失败，状态码: ${response.status}。`);
+                return;
+            }
+            const parser = new DOMParser();
+            const doc = parser.parseFromString(response.responseText, 'text/html');
+            const firstRankImage = doc.querySelector('section.ranking-item[data-rank="1"] img');
+            if (firstRankImage) {
+                const thumbnailUrl = firstRankImage.dataset.src;
+                const masterUrl = thumbnailUrl.replace(/\/c\/[a-zA-Z0-9_]+\/img-master\//, '/img-master/');
+                fetchAndApplyImage(masterUrl);
+            } else {
+                console.error('[BGM背景脚本] 步骤1失败: 在返回的HTML中未能找到排名第一的图片元素。');
+            }
+        },
+        onerror: function(error) {
+            console.error('[BGM背景脚本] 步骤1失败: 获取排行榜页面时发生网络错误。', error);
+        }
+    });
+
+
+    /**
+     * 步骤二：获取图片文件本身
+     * @param {string} imageUrl - 从排行榜页面解析出的高清图片URL
+     */
+    function fetchAndApplyImage(imageUrl) {
+        console.log(`[BGM背景脚本] 步骤2: 正在获取图片文件... URL: ${imageUrl}`);
+
+        GM_xmlhttpRequest({
+            method: 'GET',
+            url: imageUrl,
+            responseType: 'blob',
+            headers: {
+                'Referer': 'https://www.pixiv.net/',
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36'
+            },
+            onload: function(response) {
+                if (response.status !== 200) {
+                    console.error(`[BGM背景脚本] 步骤2失败: 获取图片文件失败，状态码: ${response.status}`);
+                    return;
+                }
+
+                const objectURL = URL.createObjectURL(response.response);
+                console.log('[BGM背景脚本] 步骤3: 图片获取成功，正在应用背景...');
+
+                GM_addStyle(`
+                    body {
+                        /* --- 核心改动点 --- */
+                        /* * 这里使用了CSS的“多重背景”特性。
+                         * 第一层背景: 一个半透明的白色渐变层(linear-gradient)，起到“滤镜”或“磨砂”效果。
+                         * 第二层背景: 我们获取到的图片URL。
+                         * 两层叠加，就实现了让背景图变淡的效果。
+                         */
+                        background-image: linear-gradient(rgba(255, 255, 255, ${BACKGROUND_TINT_OPACITY}), rgba(255, 255, 255, ${BACKGROUND_TINT_OPACITY})), url("${objectURL}") !important;
+                        background-size: cover !important;
+                        background-position: center center !important;
+                        background-attachment: fixed !important;
+                        background-repeat: no-repeat !important;
+                    }
+                    /* --- 半透明样式 --- */
+                    #main.mainWrapper, #header, #prgManager, #columnHomeB > div, #home_tml, .sideInner, .featuredItems .appItem {
+                        background-color: rgba(255, 255, 255, ${MAIN_OPACITY}) !important;
+                        border: none !important; box-shadow: none !important; border-radius: 12px;
+                    }
+                    #prgManagerHeader, #listWrapper, #prgManagerMain, #timeline, .columns .sidePanel, .sidePanelHome {
+                        background: transparent !important;
+                    }
+                    #prgSubjectList li {
+                        background-color: rgba(245, 245, 245, ${ITEM_OPACITY}) !important;
+                        border-radius: 8px; border: none !important;
+                    }
+                `);
+            },
+            onerror: function(error) {
+                console.error('[BGM背景脚本] 步骤2失败: 获取图片时发生网络错误。', error);
+            }
+        });
+    }
+
+
+})();
