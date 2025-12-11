@@ -1,9 +1,9 @@
 // ==UserScript==
-// @name         Bangumi Pixiv每日背景 (v1.2 背景亮度可调版)
-// @name:zh-CN   Bangumi Pixiv每日背景 (v1.2 背景亮度可调版)
+// @name         Bangumi Pixiv每日背景 (v1.5 API直连版)
+// @name:zh-CN   Bangumi Pixiv每日背景 (v1.5 API直连版)
 // @namespace    http://tampermonkey.net/
-// @version      1.2
-// @description  【最终稳定版】直接请求Pixiv获取日榜第一图片作为BGM背景，可自定义背景亮度和内容区域透明度。
+// @version      1.5
+// @description  【核心重构】抛弃DOM解析，直接调用Pixiv API获取JSON数据，彻底解决CSR渲染无法获取图片的问题。
 // @author       Gemini & Sai
 // @match        *://bgm.tv/*
 // @match        *://chii.in/*
@@ -17,93 +17,111 @@
     'use strict';
 
     // --- 用户自定义配置区域 ---
-    // 你可以在这里轻松修改各种透明度/亮度效果
-
-    // 1. 背景图片的“亮度”（白色遮罩的不透明度）
-    //    数值越大，白色遮罩越浓，背景图就越'淡'，前景文字越清晰。
-    //    推荐值：0.6 ~ 0.85。设为 0.0 则完全不遮挡，恢复原始图片亮度。
-    const BACKGROUND_TINT_OPACITY = 0.5;
-
-    // 2. 主要内容区域的不透明度
-    //    数值越小，内容模块越透明。
-    const MAIN_OPACITY = 0.3;
-
-    // 3. 列表项等次要区域的不透明度
+    const BACKGROUND_TINT_OPACITY = 0.5; // 0.0 ~ 1.0
+    const MAIN_OPACITY = 0.75;
     const ITEM_OPACITY = 0.85;
     // --- 自定义区域结束 ---
 
+    // 伪装头 (保持高仿真)
+    const COMMON_HEADERS = {
+        'sec-ch-ua': '"Google Chrome";v="143", "Chromium";v="143", "Not A(Brand";v="24"',
+        'sec-ch-ua-mobile': '?0',
+        'sec-ch-ua-platform': '"Windows"',
+        'upgrade-insecure-requests': '1',
+        'user-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/143.0.0.0 Safari/537.36',
+        'accept-language': 'zh-CN,zh-TW;q=0.9,zh;q=0.8,en-US;q=0.7,en;q=0.6',
+        'cache-control': 'no-cache',
+        'pragma': 'no-cache'
+    };
+
     /**
-     * 步骤一：获取 Pixiv 排行榜页面的 HTML
+     * 步骤一：直接请求 Pixiv 排行榜 API (JSON格式)
+     * 运维注：使用 format=json 参数直接获取结构化数据，绕过 React 渲染
      */
-    console.log('[BGM背景脚本] 步骤1: 正在获取Pixiv排行榜页面...');
+    console.log('[BGM背景脚本] 步骤1: 正在调用Pixiv API接口...');
     GM_xmlhttpRequest({
         method: 'GET',
-        url: 'https://www.pixiv.net/ranking.php?mode=daily&content=illust',
+        // 关键点：添加 &format=json，服务器会直接返回 JSON 数据而不是 HTML 页面
+        url: 'https://www.pixiv.net/ranking.php?mode=daily&content=illust&format=json',
         headers: {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36',
-            'Accept-Language': 'zh-CN,zh;q=0.9'
+            ...COMMON_HEADERS,
+            'accept': 'application/json, text/javascript, */*; q=0.01', // 声明我们需要 JSON
+            'x-requested-with': 'XMLHttpRequest', // 模拟 AJAX 请求
+            'sec-fetch-dest': 'empty',
+            'sec-fetch-mode': 'cors',
+            'sec-fetch-site': 'same-origin'
         },
         onload: function(response) {
             if (response.status !== 200) {
-                console.error(`[BGM背景脚本] 步骤1失败: 获取排行榜页面失败，状态码: ${response.status}。`);
+                console.error(`[BGM背景脚本] API请求失败: ${response.status}`);
                 return;
             }
-            const parser = new DOMParser();
-            const doc = parser.parseFromString(response.responseText, 'text/html');
-            const firstRankImage = doc.querySelector('section.ranking-item[data-rank="1"] img');
-            if (firstRankImage) {
-                const thumbnailUrl = firstRankImage.dataset.src;
-                const masterUrl = thumbnailUrl.replace(/\/c\/[a-zA-Z0-9_]+\/img-master\//, '/img-master/');
-                fetchAndApplyImage(masterUrl);
-            } else {
-                console.error('[BGM背景脚本] 步骤1失败: 在返回的HTML中未能找到排名第一的图片元素。');
+
+            try {
+                // 解析 JSON 数据
+                const data = JSON.parse(response.responseText);
+
+                // 提取排名第一的数据 (contents 数组的第一个元素)
+                if (data && data.contents && data.contents.length > 0) {
+                    const firstItem = data.contents[0];
+                    const thumbnailUrl = firstItem.url; // 这里的 url 通常是缩略图
+
+                    console.log(`[BGM背景脚本] API返回榜首ID: ${firstItem.illust_id}, 缩略图: ${thumbnailUrl}`);
+
+                    // 转换为高清图 URL (逻辑不变)
+                    // 示例输入: https://i.pximg.net/c/240x480/img-master/img/.../xxx_p0_master1200.jpg
+                    // 目标输出: https://i.pximg.net/img-master/img/.../xxx_p0_master1200.jpg
+                    const masterUrl = thumbnailUrl.replace(/\/c\/[a-zA-Z0-9_]+\/img-master\//, '/img-master/');
+
+                    fetchAndApplyImage(masterUrl);
+                } else {
+                    console.error('[BGM背景脚本] API返回的 contents 为空。');
+                }
+            } catch (e) {
+                console.error('[BGM背景脚本] JSON解析失败:', e);
+                console.log('API响应内容:', response.responseText.substring(0, 500));
             }
         },
-        onerror: function(error) {
-            console.error('[BGM背景脚本] 步骤1失败: 获取排行榜页面时发生网络错误。', error);
+        onerror: function(err) {
+            console.error('[BGM背景脚本] 网络请求错误:', err);
         }
     });
 
-
     /**
-     * 步骤二：获取图片文件本身
-     * @param {string} imageUrl - 从排行榜页面解析出的高清图片URL
+     * 步骤二：下载图片并应用 (保持不变)
      */
     function fetchAndApplyImage(imageUrl) {
-        console.log(`[BGM背景脚本] 步骤2: 正在获取图片文件... URL: ${imageUrl}`);
+        console.log(`[BGM背景脚本] 步骤2: 正在下载高清图... ${imageUrl}`);
 
         GM_xmlhttpRequest({
             method: 'GET',
             url: imageUrl,
             responseType: 'blob',
             headers: {
-                'Referer': 'https://www.pixiv.net/',
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36'
+                ...COMMON_HEADERS,
+                'referer': 'https://www.pixiv.net/',
+                'priority': 'u=0, i',
+                'accept': 'image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8',
+                'sec-fetch-dest': 'image',
+                'sec-fetch-mode': 'no-cors',
+                'sec-fetch-site': 'cross-site'
             },
             onload: function(response) {
                 if (response.status !== 200) {
-                    console.error(`[BGM背景脚本] 步骤2失败: 获取图片文件失败，状态码: ${response.status}`);
+                    console.error(`[BGM背景脚本] 图片下载失败 ${response.status}`);
                     return;
                 }
-
                 const objectURL = URL.createObjectURL(response.response);
-                console.log('[BGM背景脚本] 步骤3: 图片获取成功，正在应用背景...');
+                console.log('[BGM背景脚本] 步骤3: 图片应用成功。');
 
                 GM_addStyle(`
                     body {
-                        /* --- 核心改动点 --- */
-                        /* * 这里使用了CSS的“多重背景”特性。
-                         * 第一层背景: 一个半透明的白色渐变层(linear-gradient)，起到“滤镜”或“磨砂”效果。
-                         * 第二层背景: 我们获取到的图片URL。
-                         * 两层叠加，就实现了让背景图变淡的效果。
-                         */
                         background-image: linear-gradient(rgba(255, 255, 255, ${BACKGROUND_TINT_OPACITY}), rgba(255, 255, 255, ${BACKGROUND_TINT_OPACITY})), url("${objectURL}") !important;
                         background-size: cover !important;
                         background-position: center center !important;
                         background-attachment: fixed !important;
                         background-repeat: no-repeat !important;
                     }
-                    /* --- 半透明样式 --- */
                     #main.mainWrapper, #header, #prgManager, #columnHomeB > div, #home_tml, .sideInner, .featuredItems .appItem {
                         background-color: rgba(255, 255, 255, ${MAIN_OPACITY}) !important;
                         border: none !important; box-shadow: none !important; border-radius: 12px;
@@ -116,12 +134,7 @@
                         border-radius: 8px; border: none !important;
                     }
                 `);
-            },
-            onerror: function(error) {
-                console.error('[BGM背景脚本] 步骤2失败: 获取图片时发生网络错误。', error);
             }
         });
     }
-
-
 })();
